@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>RelayAgent</RootNamespace>
+    <!-- Code says RelayAgent; the binary you actually type says relay. -->
+    <AssemblyName>relay</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Native AOT -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+
+    <!-- Surface every trim/AOT warning individually instead of one rolled-up line.
+         Turn these on from day one; retrofitting them later is miserable. -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+
+    <!-- The most valuable switch in this file. Makes reflection-based
+         System.Text.Json throw at RUNTIME even in a normal debug build, so you
+         find missing [JsonSerializable] entries immediately instead of at
+         `dotnet publish` time. -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+
+</Project>
