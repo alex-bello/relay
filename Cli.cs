@@ -100,7 +100,7 @@ public static class AuthCommands
   private static string FormatStatus(AuthStatus status) => status switch
   {
     { SignedIn: true, ExpiresIn: { } remaining } => $"Signed in (expires in {FormatDuration(remaining)})",
-    _ => "Not signed in — run 'relay auth login'"
+    _ => AuthManager.NotSignedInMessage
   };
 
   private static string FormatDuration(TimeSpan remaining)
