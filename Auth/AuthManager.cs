@@ -23,7 +23,7 @@ public sealed record ChatGptCredentials(
 
 public sealed record AuthStatus(bool SignedIn, TimeSpan? ExpiresIn);
 
-/// <summary>Response shape shared by the authorization-code exchange and the refresh grant (ticket #16); every field is optional on refresh, required on first login.</summary>
+/// <summary>Response shape shared by the authorization-code exchange and the refresh grant (ticket #17); every field is optional on refresh, required on first login.</summary>
 internal sealed class TokenResponse
 {
   [JsonPropertyName("id_token")] public string? IdToken { get; set; }
@@ -37,9 +37,31 @@ internal sealed class ApiKeyResponse
   [JsonPropertyName("access_token")] public string? AccessToken { get; set; }
 }
 
+/// <summary>Response shape of `POST /api/accounts/deviceauth/usercode`, the first step of the headless device-code flow.</summary>
+internal sealed class DeviceUserCodeResponse
+{
+  [JsonPropertyName("device_auth_id")] public string? DeviceAuthId { get; set; }
+  [JsonPropertyName("user_code")] public string? UserCode { get; set; }
+  [JsonPropertyName("interval")] public int? Interval { get; set; }
+}
+
+/// <summary>
+/// Response shape of each `POST /api/accounts/deviceauth/token` poll. While the user hasn't yet
+/// entered the code, the server answers with `error: "authorization_pending"`; on success it
+/// answers with the fields needed to run the same code-exchange call the browser flow uses.
+/// </summary>
+internal sealed class DeviceTokenPollResponse
+{
+  [JsonPropertyName("authorization_code")] public string? AuthorizationCode { get; set; }
+  [JsonPropertyName("code_verifier")] public string? CodeVerifier { get; set; }
+  [JsonPropertyName("error")] public string? Error { get; set; }
+}
+
 [JsonSerializable(typeof(ChatGptCredentials))]
 [JsonSerializable(typeof(TokenResponse))]
 [JsonSerializable(typeof(ApiKeyResponse))]
+[JsonSerializable(typeof(DeviceUserCodeResponse))]
+[JsonSerializable(typeof(DeviceTokenPollResponse))]
 internal sealed partial class AuthJson : JsonSerializerContext;
 
 /// <summary>
@@ -59,6 +81,11 @@ public sealed class AuthManager
   private const string ClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
   private const string Scopes = "openid profile email offline_access api.connectors.read api.connectors.invoke";
   private const string Originator = "relay_cli";
+
+  // Headless fallback (ticket #16) for hosts with no local browser. Same issuer/client as the
+  // browser flow; the server — not relay — owns PKCE for this path, handing back a code_verifier
+  // alongside the authorization_code once the user enters the code.
+  private static readonly TimeSpan DeviceCodeMaxWait = TimeSpan.FromMinutes(15);
 
   private readonly HttpClient _http;
   private readonly TimeProvider _clock;
@@ -114,6 +141,84 @@ public sealed class AuthManager
     await WriteChatGptAsync(
         new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, apiKey, DecodeClaim(tokens.IdToken!, "chatgpt_account_id")),
         ct);
+  }
+
+  /// <summary>
+  /// Runs the headless "Sign in with ChatGPT" flow for hosts with no local browser: requests a
+  /// user code, hands it to <paramref name="onCodeReady"/> to display, polls for the user to enter
+  /// it elsewhere, then exchanges and persists the result exactly like <see cref="LoginAsync(CancellationToken)"/>.
+  /// Gives up with an explicit error after 15 minutes rather than polling indefinitely.
+  /// </summary>
+  public Task LoginWithDeviceCodeAsync(Action<string, Uri> onCodeReady, CancellationToken ct = default) =>
+      LoginWithDeviceCodeAsync(onCodeReady, static (interval, token) => Task.Delay(interval, token), ct);
+
+  /// <summary>Test seam: production always waits out the real poll interval via <see cref="Task.Delay(TimeSpan,CancellationToken)"/>; tests substitute a fake that advances a fake clock instead.</summary>
+  internal async Task LoginWithDeviceCodeAsync(
+      Action<string, Uri> onCodeReady, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken ct)
+  {
+    var userCode = await RequestDeviceUserCodeAsync(ct);
+    onCodeReady(userCode.UserCode!, new Uri($"{Issuer}/deviceauth"));
+
+    var interval = TimeSpan.FromSeconds(userCode.Interval!.Value);
+    var deadline = _clock.GetUtcNow() + DeviceCodeMaxWait;
+
+    DeviceTokenPollResponse poll;
+    while (true)
+    {
+      if (_clock.GetUtcNow() >= deadline)
+        throw new InvalidOperationException($"ChatGPT device-code sign-in timed out after {DeviceCodeMaxWait.TotalMinutes:0} minutes.");
+
+      poll = await PollDeviceTokenAsync(userCode.DeviceAuthId!, userCode.UserCode!, ct);
+      if (!string.IsNullOrEmpty(poll.AuthorizationCode))
+        break;
+
+      await delay(interval, ct);
+    }
+
+    if (string.IsNullOrEmpty(poll.CodeVerifier))
+      throw new InvalidOperationException("ChatGPT device-code token endpoint returned an authorization code without a code verifier.");
+
+    var tokens = await ExchangeCodeAsync(poll.AuthorizationCode!, poll.CodeVerifier, new Uri($"{Issuer}/deviceauth/callback"), ct);
+    var apiKey = await DeriveApiKeyAsync(tokens.IdToken!, ct);
+
+    await WriteChatGptAsync(
+        new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, apiKey, DecodeClaim(tokens.IdToken!, "chatgpt_account_id")),
+        ct);
+  }
+
+  private async Task<DeviceUserCodeResponse> RequestDeviceUserCodeAsync(CancellationToken ct)
+  {
+    var result = await PostFormAsync(
+        $"{Issuer}/api/accounts/deviceauth/usercode",
+        new Dictionary<string, string> { ["client_id"] = ClientId },
+        AuthJson.Default.DeviceUserCodeResponse,
+        ct);
+
+    if (string.IsNullOrEmpty(result.DeviceAuthId) || string.IsNullOrEmpty(result.UserCode) || result.Interval is not > 0)
+      throw new InvalidOperationException("ChatGPT device-code endpoint response was missing a required field.");
+
+    return result;
+  }
+
+  private async Task<DeviceTokenPollResponse> PollDeviceTokenAsync(string deviceAuthId, string userCode, CancellationToken ct)
+  {
+    using var response = await _http.PostAsync(
+        $"{Issuer}/api/accounts/deviceauth/token",
+        new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+          ["device_auth_id"] = deviceAuthId,
+          ["user_code"] = userCode,
+        }),
+        ct);
+    var body = await response.Content.ReadAsStringAsync(ct);
+
+    var result = JsonSerializer.Deserialize(body, AuthJson.Default.DeviceTokenPollResponse)
+        ?? throw new InvalidOperationException("ChatGPT device-code token endpoint returned an empty response.");
+
+    if (response.IsSuccessStatusCode || result.Error == "authorization_pending")
+      return result;
+
+    throw new InvalidOperationException($"ChatGPT device-code sign-in failed: {result.Error ?? $"token endpoint returned {(int)response.StatusCode}"}.");
   }
 
   private static Uri BuildAuthorizeUrl(Uri redirectUri, string challenge, string state)
@@ -175,16 +280,20 @@ public sealed class AuthManager
         : result.AccessToken;
   }
 
-  private async Task<T> PostTokenEndpointAsync<T>(Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct)
+  private Task<T> PostTokenEndpointAsync<T>(Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct) =>
+      PostFormAsync($"{Issuer}/oauth/token", form, typeInfo, ct);
+
+  /// <summary>Shared shape for the two auth endpoints (token exchange, device-code usercode) that always succeed-or-throw. The device-code poll endpoint has its own handling — a specific error there means "keep waiting," not "fail" — so it posts and parses independently instead of going through this.</summary>
+  private async Task<T> PostFormAsync<T>(string url, Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct)
   {
-    using var response = await _http.PostAsync($"{Issuer}/oauth/token", new FormUrlEncodedContent(form), ct);
+    using var response = await _http.PostAsync(url, new FormUrlEncodedContent(form), ct);
     var body = await response.Content.ReadAsStringAsync(ct);
 
     if (!response.IsSuccessStatusCode)
-      throw new InvalidOperationException($"ChatGPT token endpoint returned {(int)response.StatusCode}: {body}");
+      throw new InvalidOperationException($"ChatGPT endpoint returned {(int)response.StatusCode}: {body}");
 
     return JsonSerializer.Deserialize(body, typeInfo)
-        ?? throw new InvalidOperationException("ChatGPT token endpoint returned an empty response.");
+        ?? throw new InvalidOperationException("ChatGPT endpoint returned an empty response.");
   }
 
   private static Task OpenBrowserAsync(Uri uri, CancellationToken ct)
