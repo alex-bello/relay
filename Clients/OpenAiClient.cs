@@ -70,23 +70,47 @@ internal sealed class WireResponse
 [JsonSerializable(typeof(WireResponse))]
 internal sealed partial class OpenAiJson : JsonSerializerContext;
 
+/// <summary>
+/// Where <see cref="OpenAiClient"/> gets the Bearer token it sends with each request. A static
+/// API key (<see cref="StaticCredentialSource"/>) covers today's `openai`/`local` backends; a
+/// refreshable, OAuth-derived token (the `chatgpt` backend) is supplied via
+/// <see cref="DelegateCredentialSource"/> wrapping the auth manager. Queried before every request
+/// rather than once at construction, since the latter can rotate mid-session.
+/// </summary>
+public interface ICredentialSource
+{
+  Task<string?> GetAccessTokenAsync(CancellationToken ct);
+}
+
+/// <summary>A fixed API key (or none), unchanged for the client's lifetime — today's `openai`/`local` behavior.</summary>
+public sealed class StaticCredentialSource(string? apiKey) : ICredentialSource
+{
+  public Task<string?> GetAccessTokenAsync(CancellationToken ct) => Task.FromResult(apiKey);
+}
+
+/// <summary>Adapts any async token getter (e.g. <c>AuthManager.GetFreshAccessTokenAsync</c>) into a credential source, without this client needing to know about auth-manager or OAuth specifics.</summary>
+public sealed class DelegateCredentialSource(Func<CancellationToken, Task<string>> getAccessToken) : ICredentialSource
+{
+  public async Task<string?> GetAccessTokenAsync(CancellationToken ct) => await getAccessToken(ct);
+}
+
 // ---------------------------------------------------------------------------
 
 public sealed class OpenAiClient : ILlmClient
 {
   private readonly HttpClient _http;
+  private readonly ICredentialSource _credentialSource;
   private readonly string _model;
 
   /// <summary>Parsed argument payloads, kept alive because JsonElement points into them.</summary>
   private readonly List<JsonDocument> _retained = [];
 
-  public OpenAiClient(HttpClient http, Uri baseAddress, string? apiKey, string model)
+  public OpenAiClient(HttpClient http, Uri baseAddress, ICredentialSource credentialSource, string model)
   {
     _http = http;
+    _credentialSource = credentialSource;
     _model = model;
     _http.BaseAddress ??= baseAddress;
-    if (!string.IsNullOrEmpty(apiKey))
-      _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
   }
 
   public async Task<Message> CompleteAsync(
@@ -119,8 +143,16 @@ public sealed class OpenAiClient : ILlmClient
       }).ToList()
     };
 
-    using var response = await _http.PostAsJsonAsync(
-        "v1/chat/completions", request, OpenAiJson.Default.WireRequest, ct);
+    using var requestMessage = new HttpRequestMessage(HttpMethod.Post, "v1/chat/completions")
+    {
+      Content = JsonContent.Create(request, OpenAiJson.Default.WireRequest)
+    };
+
+    var token = await _credentialSource.GetAccessTokenAsync(ct);
+    if (!string.IsNullOrEmpty(token))
+      requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+    using var response = await _http.SendAsync(requestMessage, ct);
 
     if (!response.IsSuccessStatusCode)
     {

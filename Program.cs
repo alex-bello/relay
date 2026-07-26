@@ -42,8 +42,14 @@ ILlmClient client = backend.ToLowerInvariant() switch
   "openai" or "local" => new OpenAiClient(
       http,
       new Uri(Environment.GetEnvironmentVariable("OPENAI_BASE_URL") ?? "http://vm-llm:8080/"),
-      Environment.GetEnvironmentVariable("OPENAI_API_KEY"),
+      new StaticCredentialSource(Environment.GetEnvironmentVariable("OPENAI_API_KEY")),
       Environment.GetEnvironmentVariable("RELAY_MODEL") ?? "local-model"),
+
+  "chatgpt" => new OpenAiClient(
+      http,
+      new Uri("https://api.openai.com/"),
+      new DelegateCredentialSource(new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath()).GetFreshAccessTokenAsync),
+      Environment.GetEnvironmentVariable("RELAY_MODEL") ?? "gpt-5"),
 
   _ => throw new InvalidOperationException($"Unknown backend '{backend}'.")
 };
