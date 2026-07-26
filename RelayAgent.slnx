@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="RelayAgent.csproj" />
+  <Project Path="RelayAgent.Tests/RelayAgent.Tests.csproj" />
+</Solution>
