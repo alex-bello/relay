@@ -35,6 +35,21 @@ public class CommandParserTests
   }
 
   [Fact]
+  public void Auth_login_with_device_code_flag_dispatches_to_the_device_code_action()
+  {
+    var result = CommandParser.Parse(["auth", "login", "--device-code"]);
+
+    var auth = Assert.IsType<RelayCommand.Auth>(result);
+    Assert.Equal(AuthAction.LoginDeviceCode, auth.Action);
+  }
+
+  [Fact]
+  public void Auth_login_with_an_unknown_option_throws()
+  {
+    Assert.Throws<ArgumentException>(() => CommandParser.Parse(["auth", "login", "--bogus"]));
+  }
+
+  [Fact]
   public void Auth_with_no_subcommand_throws()
   {
     Assert.Throws<ArgumentException>(() => CommandParser.Parse(["auth"]));

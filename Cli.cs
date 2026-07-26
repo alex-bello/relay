@@ -5,6 +5,7 @@ namespace RelayAgent.Cli;
 public enum AuthAction
 {
   Login,
+  LoginDeviceCode,
   Status,
   Logout
 }
@@ -33,11 +34,11 @@ public static class CommandParser
     if (args.Length > 0 && args[0] == "auth")
     {
       if (args.Length < 2)
-        throw new ArgumentException("Usage: relay auth <login|status|logout>");
+        throw new ArgumentException("Usage: relay auth <login [--device-code]|status|logout>");
 
       var action = args[1] switch
       {
-        "login" => AuthAction.Login,
+        "login" => ParseLoginAction(args),
         "status" => AuthAction.Status,
         "logout" => AuthAction.Logout,
         _ => throw new ArgumentException($"Unknown auth subcommand '{args[1]}'.")
@@ -48,6 +49,17 @@ public static class CommandParser
 
     return new RelayCommand.Workspace(args.Length > 0 ? args[0] : Directory.GetCurrentDirectory());
   }
+
+  private static AuthAction ParseLoginAction(string[] args)
+  {
+    if (args.Length == 2)
+      return AuthAction.Login;
+
+    if (args.Length == 3 && args[2] == "--device-code")
+      return AuthAction.LoginDeviceCode;
+
+    throw new ArgumentException($"Unknown option '{args[2]}' for 'relay auth login'.");
+  }
 }
 
 /// <summary>Console-facing glue: formats <see cref="AuthManager"/> results into relay's terse output.</summary>
@@ -56,6 +68,7 @@ public static class AuthCommands
   public static async Task<string> ExecuteAsync(AuthAction action, AuthManager authManager) => action switch
   {
     AuthAction.Login => await LoginAsync(authManager),
+    AuthAction.LoginDeviceCode => await LoginWithDeviceCodeAsync(authManager),
     AuthAction.Status => FormatStatus(await authManager.GetStatusAsync()),
     AuthAction.Logout => await LogoutAsync(authManager),
     _ => throw new ArgumentOutOfRangeException(nameof(action))
@@ -65,6 +78,16 @@ public static class AuthCommands
   {
     Console.WriteLine("Opening a browser to sign in with ChatGPT...");
     await authManager.LoginAsync();
+    return FormatStatus(await authManager.GetStatusAsync());
+  }
+
+  private static async Task<string> LoginWithDeviceCodeAsync(AuthManager authManager)
+  {
+    await authManager.LoginWithDeviceCodeAsync((userCode, verificationUrl) =>
+    {
+      Console.WriteLine($"Go to {verificationUrl} and enter code: {userCode}");
+      Console.WriteLine("Waiting for you to finish signing in there...");
+    });
     return FormatStatus(await authManager.GetStatusAsync());
   }
 
