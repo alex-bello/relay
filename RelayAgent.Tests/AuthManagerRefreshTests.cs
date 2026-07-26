@@ -114,6 +114,19 @@ public class AuthManagerRefreshTests : IDisposable
   }
 
   [Fact]
+  public async Task GetFreshAccessTokenAsync_propagates_a_transient_server_error_instead_of_reporting_not_signed_in()
+  {
+    var staleToken = MakeJwt(_clock.GetUtcNow().AddMinutes(1));
+    var handler = new FakeRefreshEndpoint { FailRefresh = true, RefreshFailureStatus = HttpStatusCode.BadGateway };
+    var manager = new AuthManager(new HttpClient(handler), _clock, _path);
+    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "api-key", "acct-1"));
+
+    var ex = await Assert.ThrowsAsync<HttpRequestException>(() => manager.GetFreshAccessTokenAsync());
+
+    Assert.Equal(HttpStatusCode.BadGateway, ex.StatusCode);
+  }
+
+  [Fact]
   public async Task GetFreshAccessTokenAsync_adopts_a_fresher_token_already_on_disk_without_calling_the_network()
   {
     var staleToken = MakeJwt(_clock.GetUtcNow().AddMinutes(1));
@@ -171,6 +184,7 @@ public class AuthManagerRefreshTests : IDisposable
   private sealed class FakeRefreshEndpoint : HttpMessageHandler
   {
     public bool FailRefresh { get; init; }
+    public HttpStatusCode RefreshFailureStatus { get; init; } = HttpStatusCode.BadRequest;
     public string AccessToken { get; init; } = "unused";
     public string RefreshToken { get; init; } = "unused";
     public Action? OnRefreshAttempt { get; init; }
@@ -194,7 +208,7 @@ public class AuthManagerRefreshTests : IDisposable
       OnRefreshAttempt?.Invoke();
 
       if (FailRefresh)
-        return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("invalid_grant") };
+        return new HttpResponseMessage(RefreshFailureStatus) { Content = new StringContent("invalid_grant") };
 
       return new HttpResponseMessage(HttpStatusCode.OK)
       {

@@ -373,10 +373,9 @@ public sealed class AuthManager
       return stored.AccessToken;
 
     // Another process may have already refreshed since the read above landed.
-    var current = await ReadChatGptAsync(ct);
-    if (!string.IsNullOrEmpty(current?.AccessToken) && !IsNearExpiry(current.AccessToken))
-      return current.AccessToken;
-    current ??= stored;
+    var current = await TryReadFreshAsync(ct) ?? stored;
+    if (!IsNearExpiry(current.AccessToken!))
+      return current.AccessToken!;
 
     try
     {
@@ -393,15 +392,22 @@ public sealed class AuthManager
     }
     catch (InvalidOperationException)
     {
-      // Most likely cause: another process already consumed this (single-use, rotating) refresh
-      // token and won the race. Adopt its result if it landed; only report "not signed in" if the
-      // refresh token was genuinely dead.
-      var afterFailure = await ReadChatGptAsync(ct);
-      if (!string.IsNullOrEmpty(afterFailure?.AccessToken) && !IsNearExpiry(afterFailure.AccessToken))
-        return afterFailure.AccessToken;
-
-      throw new InvalidOperationException(NotSignedInMessage);
+      // Only a rejected grant (4xx — RefreshTokenAsync lets a 5xx propagate as HttpRequestException
+      // instead, uncaught here) lands in this block. Most likely cause: another process already
+      // consumed this (single-use, rotating) refresh token and won the race. Adopt its result if it
+      // landed; only report "not signed in" if the refresh token was genuinely dead.
+      var afterFailure = await TryReadFreshAsync(ct);
+      return afterFailure?.AccessToken ?? throw new InvalidOperationException(NotSignedInMessage);
     }
+  }
+
+  /// <summary>Reads the stored credentials and returns them only if present with an access token that isn't near expiry; null otherwise.</summary>
+  private async Task<ChatGptCredentials?> TryReadFreshAsync(CancellationToken ct)
+  {
+    var credentials = await ReadChatGptAsync(ct);
+    return !string.IsNullOrEmpty(credentials?.AccessToken) && !IsNearExpiry(credentials.AccessToken)
+        ? credentials
+        : null;
   }
 
   private bool IsNearExpiry(string accessToken)
@@ -414,6 +420,16 @@ public sealed class AuthManager
   {
     var request = new RefreshRequest { ClientId = ClientId, GrantType = "refresh_token", RefreshToken = refreshToken };
     var response = await _http.PostAsJsonAsync($"{Issuer}/oauth/token", request, AuthJson.Default.RefreshRequest, ct);
+
+    // A 5xx here means the token endpoint itself is unwell, not that the refresh token was
+    // rejected — that must not be mistaken by the caller's catch below for a dead session.
+    if ((int)response.StatusCode >= 500)
+    {
+      using var _ = response;
+      var body = await response.Content.ReadAsStringAsync(ct);
+      throw new HttpRequestException($"ChatGPT refresh endpoint returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
+    }
+
     return await ParseOrThrowAsync(response, AuthJson.Default.TokenResponse, ct);
   }
 
