@@ -1,3 +1,5 @@
+using RelayAgent.Auth;
+
 namespace RelayAgent.Cli;
 
 public enum AuthAction
@@ -48,14 +50,39 @@ public static class CommandParser
   }
 }
 
-/// <summary>Stub handlers — no real auth behavior lands until later tickets.</summary>
+/// <summary>
+/// Console-facing glue: formats <see cref="AuthManager"/> results into relay's
+/// terse output. Login isn't wired up yet — only status/logout need storage.
+/// </summary>
 public static class AuthCommands
 {
-  public static string Execute(AuthAction action) => action switch
+  public static async Task<string> ExecuteAsync(AuthAction action, AuthManager authManager) => action switch
   {
     AuthAction.Login => "auth login: not implemented yet.",
-    AuthAction.Status => "auth status: not implemented yet.",
-    AuthAction.Logout => "auth logout: not implemented yet.",
+    AuthAction.Status => FormatStatus(await authManager.GetStatusAsync()),
+    AuthAction.Logout => await LogoutAsync(authManager),
     _ => throw new ArgumentOutOfRangeException(nameof(action))
   };
+
+  private static async Task<string> LogoutAsync(AuthManager authManager)
+  {
+    await authManager.LogoutAsync();
+    return "Logged out.";
+  }
+
+  private static string FormatStatus(AuthStatus status) => status switch
+  {
+    { SignedIn: true, ExpiresIn: { } remaining } => $"Signed in (expires in {FormatDuration(remaining)})",
+    _ => "Not signed in — run 'relay auth login'"
+  };
+
+  private static string FormatDuration(TimeSpan remaining)
+  {
+    var totalMinutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+    return totalMinutes < 60
+        ? $"{totalMinutes}m"
+        : totalMinutes % 60 == 0
+            ? $"{totalMinutes / 60}h"
+            : $"{totalMinutes / 60}h {totalMinutes % 60}m";
+  }
 }

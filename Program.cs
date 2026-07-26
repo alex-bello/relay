@@ -1,5 +1,6 @@
 using RelayAgent;
 using RelayAgent.Anthropic;
+using RelayAgent.Auth;
 using RelayAgent.Cli;
 using RelayAgent.OpenAI;
 using RelayAgent.Tools;
@@ -15,9 +16,12 @@ catch (ArgumentException ex)
   return 1;
 }
 
+using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+
 if (command is RelayCommand.Auth auth)
 {
-  Console.WriteLine(AuthCommands.Execute(auth.Action));
+  var authManager = new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath());
+  Console.WriteLine(await AuthCommands.ExecuteAsync(auth.Action, authManager));
   return 0;
 }
 
@@ -26,8 +30,6 @@ if (command is not RelayCommand.Workspace workspaceCommand)
 
 var workspace = workspaceCommand.Path;
 var backend = Environment.GetEnvironmentVariable("RELAY_BACKEND") ?? "anthropic";
-
-using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
 
 ILlmClient client = backend.ToLowerInvariant() switch
 {
