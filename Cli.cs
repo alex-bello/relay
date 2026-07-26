@@ -50,19 +50,23 @@ public static class CommandParser
   }
 }
 
-/// <summary>
-/// Console-facing glue: formats <see cref="AuthManager"/> results into relay's
-/// terse output. Login isn't wired up yet — only status/logout need storage.
-/// </summary>
+/// <summary>Console-facing glue: formats <see cref="AuthManager"/> results into relay's terse output.</summary>
 public static class AuthCommands
 {
   public static async Task<string> ExecuteAsync(AuthAction action, AuthManager authManager) => action switch
   {
-    AuthAction.Login => "auth login: not implemented yet.",
+    AuthAction.Login => await LoginAsync(authManager),
     AuthAction.Status => FormatStatus(await authManager.GetStatusAsync()),
     AuthAction.Logout => await LogoutAsync(authManager),
     _ => throw new ArgumentOutOfRangeException(nameof(action))
   };
+
+  private static async Task<string> LoginAsync(AuthManager authManager)
+  {
+    Console.WriteLine("Opening a browser to sign in with ChatGPT...");
+    await authManager.LoginAsync();
+    return FormatStatus(await authManager.GetStatusAsync());
+  }
 
   private static async Task<string> LogoutAsync(AuthManager authManager)
   {
