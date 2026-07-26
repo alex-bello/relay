@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -37,6 +38,14 @@ internal sealed class ApiKeyResponse
   [JsonPropertyName("access_token")] public string? AccessToken { get; set; }
 }
 
+/// <summary>Body of the refresh grant (ticket #17). Sent as a JSON object, unlike every other grant this file uses, which are form-urlencoded.</summary>
+internal sealed class RefreshRequest
+{
+  [JsonPropertyName("client_id")] public required string ClientId { get; set; }
+  [JsonPropertyName("grant_type")] public required string GrantType { get; set; }
+  [JsonPropertyName("refresh_token")] public required string RefreshToken { get; set; }
+}
+
 /// <summary>Response shape of `POST /api/accounts/deviceauth/usercode`, the first step of the headless device-code flow.</summary>
 internal sealed class DeviceUserCodeResponse
 {
@@ -62,6 +71,7 @@ internal sealed class DeviceTokenPollResponse
 [JsonSerializable(typeof(ApiKeyResponse))]
 [JsonSerializable(typeof(DeviceUserCodeResponse))]
 [JsonSerializable(typeof(DeviceTokenPollResponse))]
+[JsonSerializable(typeof(RefreshRequest))]
 internal sealed partial class AuthJson : JsonSerializerContext;
 
 /// <summary>
@@ -74,6 +84,12 @@ internal sealed partial class AuthJson : JsonSerializerContext;
 public sealed class AuthManager
 {
   private const string ChatGptKey = "chatgpt";
+
+  /// <summary>The one "not authenticated" message: no stored session and a dead refresh token both surface this — never distinct messaging per cause.</summary>
+  public const string NotSignedInMessage = "Not signed in — run 'relay auth login'";
+
+  // Matches Codex's own refresh margin: a token is refreshed ahead of expiry rather than waited out to a 401.
+  private static readonly TimeSpan RefreshMargin = TimeSpan.FromMinutes(5);
 
   // Fixed issuer/client, matching Codex CLI's own ("Sign in with ChatGPT") flow exactly — this
   // is a public PKCE client registered against auth.openai.com, not relay's own credential.
@@ -284,9 +300,13 @@ public sealed class AuthManager
       PostFormAsync($"{Issuer}/oauth/token", form, typeInfo, ct);
 
   /// <summary>Shared shape for the two auth endpoints (token exchange, device-code usercode) that always succeed-or-throw. The device-code poll endpoint has its own handling — a specific error there means "keep waiting," not "fail" — so it posts and parses independently instead of going through this.</summary>
-  private async Task<T> PostFormAsync<T>(string url, Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct)
+  private async Task<T> PostFormAsync<T>(string url, Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct) =>
+      await ParseOrThrowAsync(await _http.PostAsync(url, new FormUrlEncodedContent(form), ct), typeInfo, ct);
+
+  /// <summary>Shared succeed-or-throw response handling for every token-endpoint call in this file, whether the request body was form-urlencoded or (the refresh grant's) JSON.</summary>
+  private static async Task<T> ParseOrThrowAsync<T>(HttpResponseMessage response, JsonTypeInfo<T> typeInfo, CancellationToken ct)
   {
-    using var response = await _http.PostAsync(url, new FormUrlEncodedContent(form), ct);
+    using var _ = response;
     var body = await response.Content.ReadAsStringAsync(ct);
 
     if (!response.IsSuccessStatusCode)
@@ -331,6 +351,86 @@ public sealed class AuthManager
       return new AuthStatus(SignedIn: false, ExpiresIn: null);
 
     return new AuthStatus(SignedIn: true, ExpiresIn: remaining);
+  }
+
+  /// <summary>
+  /// Returns an access token guaranteed valid for at least <see cref="RefreshMargin"/>, refreshing
+  /// the stored credentials first if the current one is within that margin of expiry (or already
+  /// expired) — a proactive check meant to run before every completion call, not a reaction to a
+  /// 401. Two processes can race this: before spending a network call, and again if that call
+  /// fails, this re-reads auth.json and silently adopts whatever a concurrent process already
+  /// wrote there rather than overwriting it or treating a benign race loss as a dead session.
+  /// Throws with <see cref="NotSignedInMessage"/> — the same message the no-token case
+  /// surfaces — when there's no stored session or the refresh token itself no longer works.
+  /// </summary>
+  public async Task<string> GetFreshAccessTokenAsync(CancellationToken ct = default)
+  {
+    var stored = await ReadChatGptAsync(ct);
+    if (string.IsNullOrEmpty(stored?.AccessToken) || string.IsNullOrEmpty(stored.RefreshToken))
+      throw new InvalidOperationException(NotSignedInMessage);
+
+    if (!IsNearExpiry(stored.AccessToken))
+      return stored.AccessToken;
+
+    // Another process may have already refreshed since the read above landed.
+    var current = await TryReadFreshAsync(ct) ?? stored;
+    if (!IsNearExpiry(current.AccessToken!))
+      return current.AccessToken!;
+
+    try
+    {
+      var tokens = await RefreshTokenAsync(current.RefreshToken!, ct);
+      var updated = current with
+      {
+        AccessToken = tokens.AccessToken ?? current.AccessToken,
+        RefreshToken = tokens.RefreshToken ?? current.RefreshToken,
+        IdToken = tokens.IdToken ?? current.IdToken,
+      };
+
+      await WriteChatGptAsync(updated, ct);
+      return updated.AccessToken!;
+    }
+    catch (InvalidOperationException)
+    {
+      // Only a rejected grant (4xx — RefreshTokenAsync lets a 5xx propagate as HttpRequestException
+      // instead, uncaught here) lands in this block. Most likely cause: another process already
+      // consumed this (single-use, rotating) refresh token and won the race. Adopt its result if it
+      // landed; only report "not signed in" if the refresh token was genuinely dead.
+      var afterFailure = await TryReadFreshAsync(ct);
+      return afterFailure?.AccessToken ?? throw new InvalidOperationException(NotSignedInMessage);
+    }
+  }
+
+  /// <summary>Reads the stored credentials and returns them only if present with an access token that isn't near expiry; null otherwise.</summary>
+  private async Task<ChatGptCredentials?> TryReadFreshAsync(CancellationToken ct)
+  {
+    var credentials = await ReadChatGptAsync(ct);
+    return !string.IsNullOrEmpty(credentials?.AccessToken) && !IsNearExpiry(credentials.AccessToken)
+        ? credentials
+        : null;
+  }
+
+  private bool IsNearExpiry(string accessToken)
+  {
+    var expiry = DecodeExpiry(accessToken);
+    return expiry is null || expiry - _clock.GetUtcNow() <= RefreshMargin;
+  }
+
+  private async Task<TokenResponse> RefreshTokenAsync(string refreshToken, CancellationToken ct)
+  {
+    var request = new RefreshRequest { ClientId = ClientId, GrantType = "refresh_token", RefreshToken = refreshToken };
+    var response = await _http.PostAsJsonAsync($"{Issuer}/oauth/token", request, AuthJson.Default.RefreshRequest, ct);
+
+    // A 5xx here means the token endpoint itself is unwell, not that the refresh token was
+    // rejected — that must not be mistaken by the caller's catch below for a dead session.
+    if ((int)response.StatusCode >= 500)
+    {
+      using var _ = response;
+      var body = await response.Content.ReadAsStringAsync(ct);
+      throw new HttpRequestException($"ChatGPT refresh endpoint returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
+    }
+
+    return await ParseOrThrowAsync(response, AuthJson.Default.TokenResponse, ct);
   }
 
   /// <summary>Clears only the "chatgpt" section — every other top-level key is left untouched.</summary>
