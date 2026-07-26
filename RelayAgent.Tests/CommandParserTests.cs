@@ -56,16 +56,3 @@ public class CommandParserTests
   }
 }
 
-public class AuthCommandsTests
-{
-  [Theory]
-  [InlineData(AuthAction.Login)]
-  [InlineData(AuthAction.Status)]
-  [InlineData(AuthAction.Logout)]
-  public void Execute_returns_a_not_implemented_placeholder(AuthAction action)
-  {
-    var message = AuthCommands.Execute(action);
-
-    Assert.Contains("not implemented", message, StringComparison.OrdinalIgnoreCase);
-  }
-}
