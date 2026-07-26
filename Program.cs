@@ -1,9 +1,30 @@
 using RelayAgent;
 using RelayAgent.Anthropic;
+using RelayAgent.Cli;
 using RelayAgent.OpenAI;
 using RelayAgent.Tools;
 
-var workspace = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
+RelayCommand command;
+try
+{
+  command = CommandParser.Parse(args);
+}
+catch (ArgumentException ex)
+{
+  Console.Error.WriteLine(ex.Message);
+  return 1;
+}
+
+if (command is RelayCommand.Auth auth)
+{
+  Console.WriteLine(AuthCommands.Execute(auth.Action));
+  return 0;
+}
+
+if (command is not RelayCommand.Workspace workspaceCommand)
+  throw new InvalidOperationException($"Unhandled command type '{command.GetType()}'.");
+
+var workspace = workspaceCommand.Path;
 var backend = Environment.GetEnvironmentVariable("RELAY_BACKEND") ?? "anthropic";
 
 using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
@@ -60,3 +81,5 @@ while (true)
     Console.Error.WriteLine($"\n{ex.Message}\n");
   }
 }
+
+return 0;

@@ -30,4 +30,10 @@
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Default globbing is recursive; without this the test project's own
+         .cs files (and its xunit references) get swept into this project too. -->
+    <Compile Remove="RelayAgent.Tests/**/*.cs" />
+  </ItemGroup>
+
 </Project>
