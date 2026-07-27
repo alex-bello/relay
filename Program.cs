@@ -29,13 +29,27 @@ if (command is not RelayCommand.Workspace workspaceCommand)
   throw new InvalidOperationException($"Unhandled command type '{command.GetType()}'.");
 
 var workspace = workspaceCommand.Path;
-var backend = (Environment.GetEnvironmentVariable("RELAY_BACKEND") ?? "anthropic").ToLowerInvariant();
 
-// One AuthManager for the chatgpt backend, shared by the startup login gate, the mid-session
-// recovery prompt, and the per-request credential source. Null for every other backend.
-var chatGptAuth = backend == "chatgpt"
-    ? new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath())
-    : null;
+// One AuthManager for the chatgpt backend, shared by the backend auto-detection below, the startup
+// login gate, the mid-session recovery prompt, and the per-request credential source. It's cheap to
+// construct (no I/O until a method is called), so it's built unconditionally and only kept for the
+// chatgpt backend.
+var sharedAuth = new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath());
+
+// RELAY_BACKEND pins the backend explicitly; with it unset we pick whichever provider actually has
+// credentials rather than blindly defaulting to anthropic — otherwise a ChatGPT-only user would hit
+// the anthropic arm's missing-key error despite being signed in. Anthropic wins ties: an env var is
+// a more deliberate opt-in than credentials left on disk from a past `relay auth login`.
+var backend = (Environment.GetEnvironmentVariable("RELAY_BACKEND")?.ToLowerInvariant()) switch
+{
+  { Length: > 0 } pinned => pinned,
+  _ when !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")) => "anthropic",
+  _ when !string.IsNullOrEmpty((await sharedAuth.ReadChatGptAsync())?.RefreshToken) => "chatgpt",
+  _ => throw new InvalidOperationException(
+      "No authenticated provider set. Set ANTHROPIC_API_KEY, or run 'relay auth login' to sign in with ChatGPT."),
+};
+
+var chatGptAuth = backend == "chatgpt" ? sharedAuth : null;
 
 ILlmClient client = backend switch
 {
