@@ -17,7 +17,7 @@ public class AuthManagerDeviceCodeLoginTests
   public async Task LoginWithDeviceCodeAsync_displays_the_user_code_and_verification_url_before_polling()
   {
     var path = TempAuthPath();
-    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 0, "id", "access", "refresh", "api-key");
+    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 0, "id", "access", "refresh");
     var manager = new AuthManager(new HttpClient(handler), new ManualTimeProvider(DateTimeOffset.UtcNow), path);
 
     try
@@ -43,7 +43,7 @@ public class AuthManagerDeviceCodeLoginTests
   public async Task LoginWithDeviceCodeAsync_polls_until_success_then_exchanges_and_persists_credentials()
   {
     var path = TempAuthPath();
-    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 2, "id-tok", "access-tok", "refresh-tok", "derived-key");
+    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 2, "id-tok", "access-tok", "refresh-tok");
     var clock = new ManualTimeProvider(DateTimeOffset.UtcNow);
     var manager = new AuthManager(new HttpClient(handler), clock, path);
 
@@ -56,14 +56,12 @@ public class AuthManagerDeviceCodeLoginTests
       Assert.Equal("ABCD-1234", handler.CapturedUserCode);
       Assert.Equal("verifier-xyz", handler.CapturedVerifier);
       Assert.Equal("https://auth.openai.com/deviceauth/callback", handler.CapturedRedirectUri);
-      Assert.Equal("id-tok", handler.CapturedSubjectToken);
 
       var stored = await manager.ReadChatGptAsync();
       Assert.NotNull(stored);
       Assert.Equal("access-tok", stored!.AccessToken);
       Assert.Equal("refresh-tok", stored.RefreshToken);
       Assert.Equal("id-tok", stored.IdToken);
-      Assert.Equal("derived-key", stored.ApiKey);
     }
     finally
     {
@@ -75,7 +73,7 @@ public class AuthManagerDeviceCodeLoginTests
   public async Task LoginWithDeviceCodeAsync_gives_up_after_15_minutes_of_polling()
   {
     var path = TempAuthPath();
-    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: int.MaxValue, "id", "access", "refresh", "api-key");
+    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: int.MaxValue, "id", "access", "refresh");
     var clock = new ManualTimeProvider(DateTimeOffset.UtcNow);
     var manager = new AuthManager(new HttpClient(handler), clock, path);
 
@@ -97,7 +95,7 @@ public class AuthManagerDeviceCodeLoginTests
   public async Task LoginWithDeviceCodeAsync_surfaces_a_hard_error_from_the_poll_endpoint()
   {
     var path = TempAuthPath();
-    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 0, "id", "access", "refresh", "api-key")
+    var handler = new FakeDeviceEndpoint(pendingPollsBeforeSuccess: 0, "id", "access", "refresh")
     {
       FailImmediately = true
     };
@@ -150,8 +148,8 @@ public class AuthManagerDeviceCodeLoginTests
     public override DateTimeOffset GetUtcNow() => _now;
   }
 
-  /// <summary>Stubs the device-auth usercode/token endpoints plus `POST /oauth/token` for the exchange that follows a successful poll.</summary>
-  private sealed class FakeDeviceEndpoint(int pendingPollsBeforeSuccess, string idToken, string accessToken, string refreshToken, string apiKey)
+  /// <summary>Stubs the device-auth usercode/token endpoints plus the `POST /oauth/token` authorization-code exchange that follows a successful poll.</summary>
+  private sealed class FakeDeviceEndpoint(int pendingPollsBeforeSuccess, string idToken, string accessToken, string refreshToken)
       : HttpMessageHandler
   {
     public bool FailImmediately { get; init; }
@@ -160,7 +158,6 @@ public class AuthManagerDeviceCodeLoginTests
     public string? CapturedUserCode { get; private set; }
     public string? CapturedVerifier { get; private set; }
     public string? CapturedRedirectUri { get; private set; }
-    public string? CapturedSubjectToken { get; private set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -192,10 +189,6 @@ public class AuthManagerDeviceCodeLoginTests
           CapturedVerifier = fields["code_verifier"];
           CapturedRedirectUri = fields["redirect_uri"];
           return JsonResponse($$"""{"id_token":"{{idToken}}","access_token":"{{accessToken}}","refresh_token":"{{refreshToken}}"}""");
-
-        case "/oauth/token" when fields.GetValueOrDefault("grant_type") == "urn:ietf:params:oauth:grant-type:token-exchange":
-          CapturedSubjectToken = fields["subject_token"];
-          return JsonResponse($$"""{"access_token":"{{apiKey}}"}""");
 
         default:
           return new HttpResponseMessage(HttpStatusCode.NotFound);
