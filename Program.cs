@@ -51,10 +51,20 @@ ILlmClient client = backend switch
       new StaticCredentialSource(Environment.GetEnvironmentVariable("OPENAI_API_KEY")),
       Environment.GetEnvironmentVariable("RELAY_MODEL") ?? "local-model"),
 
-  "chatgpt" => new OpenAiClient(
+  // The ChatGPT sign-in token is not a platform API key: it authenticates against ChatGPT's own
+  // Responses backend, which also wants the account id in a header. See ChatGptResponsesClient.
+  "chatgpt" => new ChatGptResponsesClient(
       http,
-      new Uri("https://api.openai.com/"),
-      new DelegateCredentialSource(chatGptAuth!.GetFreshAccessTokenAsync),
+      new Uri("https://chatgpt.com/backend-api/codex/"),
+      async ct =>
+      {
+        var token = await chatGptAuth!.GetFreshAccessTokenAsync(ct);
+        var stored = await chatGptAuth.ReadChatGptAsync(ct);
+        return new ChatGptRequestCredentials(
+            token,
+            stored?.AccountId ?? throw new InvalidOperationException(
+                "ChatGPT session has no account id; run `relay auth login` again."));
+      },
       Environment.GetEnvironmentVariable("RELAY_MODEL") ?? "gpt-5"),
 
   _ => throw new InvalidOperationException($"Unknown backend '{backend}'.")
