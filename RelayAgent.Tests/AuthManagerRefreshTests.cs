@@ -69,7 +69,7 @@ public class AuthManagerRefreshTests : IDisposable
     var handler = new FakeRefreshEndpoint();
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
 
-    var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => manager.GetFreshAccessTokenAsync());
+    var ex = await Assert.ThrowsAsync<NotSignedInException>(() => manager.GetFreshAccessTokenAsync());
 
     Assert.Equal(AuthManager.NotSignedInMessage, ex.Message);
   }
@@ -82,7 +82,7 @@ public class AuthManagerRefreshTests : IDisposable
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
     await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "api-key", "acct-1"));
 
-    var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => manager.GetFreshAccessTokenAsync());
+    var ex = await Assert.ThrowsAsync<NotSignedInException>(() => manager.GetFreshAccessTokenAsync());
 
     Assert.Equal(AuthManager.NotSignedInMessage, ex.Message);
   }

@@ -29,9 +29,15 @@ if (command is not RelayCommand.Workspace workspaceCommand)
   throw new InvalidOperationException($"Unhandled command type '{command.GetType()}'.");
 
 var workspace = workspaceCommand.Path;
-var backend = Environment.GetEnvironmentVariable("RELAY_BACKEND") ?? "anthropic";
+var backend = (Environment.GetEnvironmentVariable("RELAY_BACKEND") ?? "anthropic").ToLowerInvariant();
 
-ILlmClient client = backend.ToLowerInvariant() switch
+// One AuthManager for the chatgpt backend, shared by the startup login gate, the mid-session
+// recovery prompt, and the per-request credential source. Null for every other backend.
+var chatGptAuth = backend == "chatgpt"
+    ? new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath())
+    : null;
+
+ILlmClient client = backend switch
 {
   "anthropic" => new AnthropicClient(
       http,
@@ -48,11 +54,36 @@ ILlmClient client = backend.ToLowerInvariant() switch
   "chatgpt" => new OpenAiClient(
       http,
       new Uri("https://api.openai.com/"),
-      new DelegateCredentialSource(new AuthManager(http, TimeProvider.System, AuthManager.DefaultPath()).GetFreshAccessTokenAsync),
+      new DelegateCredentialSource(chatGptAuth!.GetFreshAccessTokenAsync),
       Environment.GetEnvironmentVariable("RELAY_MODEL") ?? "gpt-5"),
 
   _ => throw new InvalidOperationException($"Unknown backend '{backend}'.")
 };
+
+// Thin glue: the login gate owns the fail-fast-vs-prompt decision; this only wires the real console
+// and auth calls into it. A no-TTY-or-declined startup exits non-zero before the REPL opens.
+// "Signed in" means we can produce a working token, not merely that an unexpired access token is
+// on disk: a lapsed access token with a live refresh token is a valid session, and this refreshes
+// it exactly as the first turn would. Only a genuinely dead session (NotSignedInException) gates;
+// a transient endpoint error propagates rather than masquerading as signed-out.
+var loginGate = chatGptAuth is null ? null : new ChatGptLoginGate(
+    new ConsoleTerminal(),
+    async ct =>
+    {
+      try
+      {
+        await chatGptAuth.GetFreshAccessTokenAsync(ct);
+        return true;
+      }
+      catch (NotSignedInException)
+      {
+        return false;
+      }
+    },
+    chatGptAuth.LoginAsync);
+
+if (loginGate is not null && !await loginGate.EnsureSignedInAsync())
+  return 1;
 
 var tools = new ToolRegistry([new ReadFileTool(workspace)]);
 
@@ -83,6 +114,15 @@ while (true)
   {
     var answer = await agent.RunTurnAsync(input);
     Console.WriteLine($"\n{answer}\n");
+  }
+  catch (NotSignedInException) when (loginGate is not null)
+  {
+    // A refresh failed mid-turn: the in-flight turn is lost. Offer an inline re-login, then fall
+    // back to the `›` prompt for the user to retype — no auto-retry of the interrupted turn, so no
+    // pending-turn state or double-executed tool calls survive the login interruption.
+    Console.Error.WriteLine();
+    await loginGate.PromptAndLoginAsync();
+    Console.WriteLine();
   }
   catch (Exception ex)
   {
