@@ -326,9 +326,14 @@ public sealed class AuthManager
 
   private static Task OpenBrowserAsync(Uri uri, CancellationToken ct)
   {
-    var startInfo = OperatingSystem.IsWindows() ? new ProcessStartInfo(uri.ToString()) { UseShellExecute = true }
-        : OperatingSystem.IsMacOS() ? new ProcessStartInfo("open", uri.ToString())
-        : new ProcessStartInfo("xdg-open", uri.ToString());
+    // AbsoluteUri (not ToString()) preserves percent-encoding; ToString() decodes %20 back to
+    // literal spaces, which then word-split the URL into multiple argv entries. ArgumentList
+    // passes the URL as a single argument regardless, so the launcher never re-splits it.
+    var url = uri.AbsoluteUri;
+    var startInfo = OperatingSystem.IsWindows() ? new ProcessStartInfo(url) { UseShellExecute = true }
+        : new ProcessStartInfo(OperatingSystem.IsMacOS() ? "open" : "xdg-open");
+    if (!OperatingSystem.IsWindows())
+      startInfo.ArgumentList.Add(url);
 
     Process.Start(startInfo);
     return Task.CompletedTask;
