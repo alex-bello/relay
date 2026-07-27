@@ -62,6 +62,83 @@ public static class CommandParser
   }
 }
 
+/// <summary>
+/// The terminal interactions the login gate needs, abstracted so the gate's branch logic can be
+/// unit-tested without a real TTY. Production wires <see cref="ConsoleTerminal"/> over
+/// <see cref="System.Console"/>; tests substitute a fake.
+/// </summary>
+public interface ILoginTerminal
+{
+  /// <summary>False when stdin or stdout is redirected — no human at the keyboard to answer a prompt.</summary>
+  bool IsInteractive { get; }
+
+  /// <summary>Prompts <paramref name="question"/> as a yes/no and returns true only for an affirmative answer.</summary>
+  bool Confirm(string question);
+
+  /// <summary>Writes a line to stderr.</summary>
+  void WriteError(string message);
+}
+
+/// <summary>Production <see cref="ILoginTerminal"/>: the thin, manually-tested glue over <see cref="Console"/>.</summary>
+public sealed class ConsoleTerminal : ILoginTerminal
+{
+  // Either stream being redirected means there's no interactive terminal to prompt at — matching
+  // the ticket's "Console.IsInputRedirected or Console.IsOutputRedirected being true counts as no TTY."
+  public bool IsInteractive => !Console.IsInputRedirected && !Console.IsOutputRedirected;
+
+  public bool Confirm(string question)
+  {
+    Console.Write($"{question} y/n ");
+    var answer = Console.ReadLine()?.Trim();
+    return answer?.StartsWith("y", StringComparison.OrdinalIgnoreCase) == true;
+  }
+
+  public void WriteError(string message) => Console.Error.WriteLine(message);
+}
+
+/// <summary>
+/// Decides what happens when the chatgpt backend needs a token it doesn't have — at startup and
+/// after a mid-session refresh failure. Terminal I/O and the login/status calls are injected, so the
+/// branch logic here is unit-testable without a real console or browser. The "no token and we're not
+/// getting one right now" outcome is one code path: a redirected terminal and an explicit "n" both
+/// take it, exactly as the ticket requires.
+/// </summary>
+public sealed class ChatGptLoginGate(
+    ILoginTerminal terminal,
+    Func<CancellationToken, Task<bool>> isSignedIn,
+    Func<CancellationToken, Task> login)
+{
+  /// <summary>Startup gate: proceed if already signed in, otherwise offer an inline login. Returns true to proceed.</summary>
+  public async Task<bool> EnsureSignedInAsync(CancellationToken ct = default) =>
+      await isSignedIn(ct) || await PromptAndLoginAsync(ct);
+
+  /// <summary>
+  /// The shared "no valid token" recovery, used by both startup and mid-REPL. No TTY, or a declined
+  /// prompt, both write the standard guidance and return false — never distinct messaging per cause.
+  /// An affirmative runs the login flow inline; success returns true, a failed login surfaces its
+  /// reason and returns false.
+  /// </summary>
+  public async Task<bool> PromptAndLoginAsync(CancellationToken ct = default)
+  {
+    if (!terminal.IsInteractive || !terminal.Confirm("sign in with ChatGPT now?"))
+    {
+      terminal.WriteError(AuthManager.NotSignedInMessage);
+      return false;
+    }
+
+    try
+    {
+      await login(ct);
+      return true;
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+      terminal.WriteError($"Sign-in failed: {ex.Message}");
+      return false;
+    }
+  }
+}
+
 /// <summary>Console-facing glue: formats <see cref="AuthManager"/> results into relay's terse output.</summary>
 public static class AuthCommands
 {

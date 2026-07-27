@@ -24,6 +24,14 @@ public sealed record ChatGptCredentials(
 
 public sealed record AuthStatus(bool SignedIn, TimeSpan? ExpiresIn);
 
+/// <summary>
+/// Raised when there is no usable ChatGPT session — no stored credentials, or a refresh token the
+/// server no longer accepts. Subclasses <see cref="InvalidOperationException"/> so callers that
+/// catch that (and assert on <see cref="AuthManager.NotSignedInMessage"/>) keep working, while the
+/// REPL can catch this specific type to offer an inline re-login instead of only printing the error.
+/// </summary>
+public sealed class NotSignedInException() : InvalidOperationException(AuthManager.NotSignedInMessage);
+
 /// <summary>Response shape shared by the authorization-code exchange and the refresh grant (ticket #17); every field is optional on refresh, required on first login.</summary>
 internal sealed class TokenResponse
 {
@@ -367,7 +375,7 @@ public sealed class AuthManager
   {
     var stored = await ReadChatGptAsync(ct);
     if (string.IsNullOrEmpty(stored?.AccessToken) || string.IsNullOrEmpty(stored.RefreshToken))
-      throw new InvalidOperationException(NotSignedInMessage);
+      throw new NotSignedInException();
 
     if (!IsNearExpiry(stored.AccessToken))
       return stored.AccessToken;
@@ -397,7 +405,7 @@ public sealed class AuthManager
       // consumed this (single-use, rotating) refresh token and won the race. Adopt its result if it
       // landed; only report "not signed in" if the refresh token was genuinely dead.
       var afterFailure = await TryReadFreshAsync(ct);
-      return afterFailure?.AccessToken ?? throw new InvalidOperationException(NotSignedInMessage);
+      return afterFailure?.AccessToken ?? throw new NotSignedInException();
     }
   }
 
