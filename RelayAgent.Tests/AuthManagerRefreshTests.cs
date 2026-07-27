@@ -9,7 +9,7 @@ namespace RelayAgent.Tests;
 /// <summary>
 /// Exercises the proactive access-token refresh added by ticket #17: the 5-minute-margin trigger,
 /// the JSON (not form-urlencoded) refresh request, persisting the rotated refresh token while
-/// leaving the derived API key untouched, the unified "not signed in" failure path, and adopting a
+/// leaving the account id untouched, the unified "not signed in" failure path, and adopting a
 /// fresher token that a concurrent relay process already wrote.
 /// </summary>
 public class AuthManagerRefreshTests : IDisposable
@@ -28,7 +28,7 @@ public class AuthManagerRefreshTests : IDisposable
     var token = MakeJwt(_clock.GetUtcNow().AddMinutes(30));
     var handler = new FakeRefreshEndpoint();
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
-    await manager.WriteChatGptAsync(new ChatGptCredentials(token, "refresh-1", "id", "api-key", "acct-1"));
+    await manager.WriteChatGptAsync(new ChatGptCredentials(token, "refresh-1", "id", "acct-1"));
 
     var result = await manager.GetFreshAccessTokenAsync();
 
@@ -43,7 +43,7 @@ public class AuthManagerRefreshTests : IDisposable
     var freshToken = MakeJwt(_clock.GetUtcNow().AddHours(1));
     var handler = new FakeRefreshEndpoint { AccessToken = freshToken, RefreshToken = "refresh-2" };
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
-    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id-old", "api-key", "acct-1"));
+    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id-old", "acct-1"));
 
     var result = await manager.GetFreshAccessTokenAsync();
 
@@ -59,7 +59,6 @@ public class AuthManagerRefreshTests : IDisposable
     var stored = await manager.ReadChatGptAsync();
     Assert.Equal(freshToken, stored!.AccessToken);
     Assert.Equal("refresh-2", stored.RefreshToken);
-    Assert.Equal("api-key", stored.ApiKey);
     Assert.Equal("acct-1", stored.AccountId);
   }
 
@@ -80,7 +79,7 @@ public class AuthManagerRefreshTests : IDisposable
     var staleToken = MakeJwt(_clock.GetUtcNow().AddMinutes(1));
     var handler = new FakeRefreshEndpoint { FailRefresh = true };
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
-    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "api-key", "acct-1"));
+    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "acct-1"));
 
     var ex = await Assert.ThrowsAsync<NotSignedInException>(() => manager.GetFreshAccessTokenAsync());
 
@@ -103,7 +102,7 @@ public class AuthManagerRefreshTests : IDisposable
       OnRefreshAttempt = () => WriteChatGptJson(_path, concurrentToken, "refresh-winner"),
     };
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
-    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "api-key", "acct-1"));
+    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "acct-1"));
 
     var result = await manager.GetFreshAccessTokenAsync();
 
@@ -119,7 +118,7 @@ public class AuthManagerRefreshTests : IDisposable
     var staleToken = MakeJwt(_clock.GetUtcNow().AddMinutes(1));
     var handler = new FakeRefreshEndpoint { FailRefresh = true, RefreshFailureStatus = HttpStatusCode.BadGateway };
     var manager = new AuthManager(new HttpClient(handler), _clock, _path);
-    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "api-key", "acct-1"));
+    await manager.WriteChatGptAsync(new ChatGptCredentials(staleToken, "refresh-1", "id", "acct-1"));
 
     var ex = await Assert.ThrowsAsync<HttpRequestException>(() => manager.GetFreshAccessTokenAsync());
 
@@ -157,7 +156,6 @@ public class AuthManagerRefreshTests : IDisposable
         ["access_token"] = accessToken,
         ["refresh_token"] = refreshToken,
         ["id_token"] = "id",
-        ["api_key"] = "api-key",
         ["account_id"] = "acct-1",
       },
     };

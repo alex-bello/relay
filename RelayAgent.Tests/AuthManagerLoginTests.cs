@@ -21,10 +21,10 @@ public class AuthManagerLoginTests
   public async Task LoginAsync_completes_the_pkce_flow_and_persists_the_derived_credentials()
   {
     var path = TempAuthPath();
-    var idToken = MakeJwt(("chatgpt_account_id", "acct-42"));
+    var idToken = MakeJwt(AuthClaim("acct-42"));
     var accessToken = MakeJwt(("exp", DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()));
 
-    var handler = new FakeTokenEndpoint(idToken, accessToken, "refresh-1", "derived-api-key");
+    var handler = new FakeTokenEndpoint(idToken, accessToken, "refresh-1");
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -57,10 +57,7 @@ public class AuthManagerLoginTests
       Assert.Equal(accessToken, stored!.AccessToken);
       Assert.Equal("refresh-1", stored.RefreshToken);
       Assert.Equal(idToken, stored.IdToken);
-      Assert.Equal("derived-api-key", stored.ApiKey);
       Assert.Equal("acct-42", stored.AccountId);
-
-      Assert.Equal(idToken, handler.CapturedSubjectToken);
     }
     finally
     {
@@ -76,7 +73,7 @@ public class AuthManagerLoginTests
     // AbsoluteUri (which keeps `%20`) rather than ToString() (which decodes it back to a
     // literal space, word-splitting the URL into bogus file-path arguments).
     var path = TempAuthPath();
-    var handler = new FakeTokenEndpoint("id", "access", "refresh", "api-key");
+    var handler = new FakeTokenEndpoint("id", "access", "refresh");
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -100,10 +97,10 @@ public class AuthManagerLoginTests
   public async Task LoginAsync_reports_signed_in_status_after_a_successful_login()
   {
     var path = TempAuthPath();
-    var idToken = MakeJwt(("chatgpt_account_id", "acct-42"));
+    var idToken = MakeJwt(AuthClaim("acct-42"));
     var accessToken = MakeJwt(("exp", DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeSeconds()));
 
-    var handler = new FakeTokenEndpoint(idToken, accessToken, "refresh-1", "derived-api-key");
+    var handler = new FakeTokenEndpoint(idToken, accessToken, "refresh-1");
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -128,7 +125,7 @@ public class AuthManagerLoginTests
   public async Task LoginAsync_rejects_a_callback_whose_state_does_not_match()
   {
     var path = TempAuthPath();
-    var handler = new FakeTokenEndpoint("id", "access", "refresh", "api-key");
+    var handler = new FakeTokenEndpoint("id", "access", "refresh");
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -152,7 +149,7 @@ public class AuthManagerLoginTests
   public async Task LoginAsync_throws_when_the_flow_is_cancelled_before_completion()
   {
     var path = TempAuthPath();
-    var handler = new FakeTokenEndpoint("id", "access", "refresh", "api-key");
+    var handler = new FakeTokenEndpoint("id", "access", "refresh");
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -176,7 +173,7 @@ public class AuthManagerLoginTests
   public async Task LoginAsync_surfaces_a_non_success_token_endpoint_response()
   {
     var path = TempAuthPath();
-    var handler = new FakeTokenEndpoint("id", "access", "refresh", "api-key") { FailCodeExchange = true };
+    var handler = new FakeTokenEndpoint("id", "access", "refresh") { FailCodeExchange = true };
     var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
 
     try
@@ -239,16 +236,19 @@ public class AuthManagerLoginTests
     return $"{header}.{payload}.sig";
   }
 
+  /// <summary>The account id lives nested under the id_token's <c>https://api.openai.com/auth</c> claim, not at the top level.</summary>
+  private static (string, object) AuthClaim(string accountId) =>
+      ("https://api.openai.com/auth", new Dictionary<string, object> { ["chatgpt_account_id"] = accountId });
+
   private static string Base64UrlEncode(byte[] bytes) =>
       Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
 
-  /// <summary>Stubs `POST /oauth/token` for both grants the login flow uses; everything else 404s.</summary>
-  private sealed class FakeTokenEndpoint(string idToken, string accessToken, string refreshToken, string apiKey)
+  /// <summary>Stubs `POST /oauth/token` for the authorization-code grant the login flow uses; everything else 404s.</summary>
+  private sealed class FakeTokenEndpoint(string idToken, string accessToken, string refreshToken)
       : HttpMessageHandler
   {
     public bool FailCodeExchange { get; init; }
     public string? CapturedVerifier { get; private set; }
-    public string? CapturedSubjectToken { get; private set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -267,12 +267,6 @@ public class AuthManagerLoginTests
         return JsonResponse($$"""
             {"id_token":"{{idToken}}","access_token":"{{accessToken}}","refresh_token":"{{refreshToken}}"}
             """);
-      }
-
-      if (fields["grant_type"] == "urn:ietf:params:oauth:grant-type:token-exchange")
-      {
-        CapturedSubjectToken = fields["subject_token"];
-        return JsonResponse($$"""{"access_token":"{{apiKey}}"}""");
       }
 
       return new HttpResponseMessage(HttpStatusCode.BadRequest);

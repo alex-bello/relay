@@ -19,7 +19,6 @@ public sealed record ChatGptCredentials(
     [property: JsonPropertyName("access_token")] string? AccessToken,
     [property: JsonPropertyName("refresh_token")] string? RefreshToken,
     [property: JsonPropertyName("id_token")] string? IdToken,
-    [property: JsonPropertyName("api_key")] string? ApiKey,
     [property: JsonPropertyName("account_id")] string? AccountId);
 
 public sealed record AuthStatus(bool SignedIn, TimeSpan? ExpiresIn);
@@ -38,12 +37,6 @@ internal sealed class TokenResponse
   [JsonPropertyName("id_token")] public string? IdToken { get; set; }
   [JsonPropertyName("access_token")] public string? AccessToken { get; set; }
   [JsonPropertyName("refresh_token")] public string? RefreshToken { get; set; }
-}
-
-/// <summary>Response shape of the RFC 8693 token-exchange grant that derives relay's platform-style API key from the ID token.</summary>
-internal sealed class ApiKeyResponse
-{
-  [JsonPropertyName("access_token")] public string? AccessToken { get; set; }
 }
 
 /// <summary>Body of the refresh grant (ticket #17). Sent as a JSON object, unlike every other grant this file uses, which are form-urlencoded.</summary>
@@ -76,7 +69,6 @@ internal sealed class DeviceTokenPollResponse
 
 [JsonSerializable(typeof(ChatGptCredentials))]
 [JsonSerializable(typeof(TokenResponse))]
-[JsonSerializable(typeof(ApiKeyResponse))]
 [JsonSerializable(typeof(DeviceUserCodeResponse))]
 [JsonSerializable(typeof(DeviceTokenPollResponse))]
 [JsonSerializable(typeof(RefreshRequest))]
@@ -128,9 +120,9 @@ public sealed class AuthManager
   /// <summary>
   /// Runs the full browser-based "Sign in with ChatGPT" flow end to end: starts the loopback
   /// callback server, opens the system browser to a freshly-built PKCE authorize URL, waits for
-  /// the redirect, exchanges the code for tokens, derives relay's platform API key via an RFC
-  /// 8693 token-exchange grant, and persists the result. Throws on cancellation, a CSRF (state
-  /// mismatch) failure, or any non-success response from the token endpoint.
+  /// the redirect, exchanges the code for tokens, and persists them (with the account id read from
+  /// the id_token). Throws on cancellation, a CSRF (state mismatch) failure, or any non-success
+  /// response from the token endpoint.
   /// </summary>
   public Task LoginAsync(CancellationToken ct = default) => LoginAsync(OpenBrowserAsync, ct);
 
@@ -160,10 +152,9 @@ public sealed class AuthManager
     }
 
     var tokens = await ExchangeCodeAsync(code, verifier, server.RedirectUri, ct);
-    var apiKey = await DeriveApiKeyAsync(tokens.IdToken!, ct);
 
     await WriteChatGptAsync(
-        new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, apiKey, DecodeClaim(tokens.IdToken!, "chatgpt_account_id")),
+        new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, DecodeAccountId(tokens.IdToken!)),
         ct);
   }
 
@@ -203,10 +194,9 @@ public sealed class AuthManager
       throw new InvalidOperationException("ChatGPT device-code token endpoint returned an authorization code without a code verifier.");
 
     var tokens = await ExchangeCodeAsync(poll.AuthorizationCode!, poll.CodeVerifier, new Uri($"{Issuer}/deviceauth/callback"), ct);
-    var apiKey = await DeriveApiKeyAsync(tokens.IdToken!, ct);
 
     await WriteChatGptAsync(
-        new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, apiKey, DecodeClaim(tokens.IdToken!, "chatgpt_account_id")),
+        new ChatGptCredentials(tokens.AccessToken, tokens.RefreshToken, tokens.IdToken, DecodeAccountId(tokens.IdToken!)),
         ct);
   }
 
@@ -283,25 +273,6 @@ public sealed class AuthManager
       throw new InvalidOperationException("ChatGPT token exchange response was missing a required field.");
 
     return tokens;
-  }
-
-  private async Task<string> DeriveApiKeyAsync(string idToken, CancellationToken ct)
-  {
-    var result = await PostTokenEndpointAsync<ApiKeyResponse>(
-        new Dictionary<string, string>
-        {
-          ["grant_type"] = "urn:ietf:params:oauth:grant-type:token-exchange",
-          ["client_id"] = ClientId,
-          ["requested_token"] = "openai-api-key",
-          ["subject_token"] = idToken,
-          ["subject_token_type"] = "urn:ietf:params:oauth:token-type:id_token",
-        },
-        AuthJson.Default.ApiKeyResponse,
-        ct);
-
-    return string.IsNullOrEmpty(result.AccessToken)
-        ? throw new InvalidOperationException("ChatGPT API key derivation response was missing 'access_token'.")
-        : result.AccessToken;
   }
 
   private Task<T> PostTokenEndpointAsync<T>(Dictionary<string, string> form, JsonTypeInfo<T> typeInfo, CancellationToken ct) =>
@@ -460,9 +431,19 @@ public sealed class AuthManager
           ? DateTimeOffset.FromUnixTimeSeconds(seconds)
           : (DateTimeOffset?)null);
 
-  /// <summary>Decodes an arbitrary string claim from a JWT's payload without verifying its signature. Returns null for a missing claim or an unparseable token.</summary>
-  private static string? DecodeClaim(string jwt, string claim) =>
-      WithDecodedPayload(jwt, payload => payload.TryGetProperty(claim, out var value) ? value.GetString() : null);
+  /// <summary>
+  /// Extracts the ChatGPT account id — sent in the <c>ChatGPT-Account-ID</c> request header — from
+  /// an id_token without verifying its signature. It is nested inside the token's
+  /// <c>https://api.openai.com/auth</c> claim object, not a top-level claim. Returns null when the
+  /// claim (or an enclosing object) is absent or the token is unparseable.
+  /// </summary>
+  private static string? DecodeAccountId(string jwt) =>
+      WithDecodedPayload(jwt, payload =>
+          payload.TryGetProperty("https://api.openai.com/auth", out var auth)
+              && auth.ValueKind == JsonValueKind.Object
+              && auth.TryGetProperty("chatgpt_account_id", out var accountId)
+              ? accountId.GetString()
+              : null);
 
   private static T? WithDecodedPayload<T>(string jwt, Func<JsonElement, T?> select)
   {

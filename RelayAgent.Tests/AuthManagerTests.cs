@@ -29,7 +29,7 @@ public class AuthManagerTests : IDisposable
   public async Task WriteChatGptAsync_then_ReadChatGptAsync_round_trips()
   {
     var manager = MakeManager();
-    var credentials = new ChatGptCredentials("access", "refresh", "id", "api-key", "acct-1");
+    var credentials = new ChatGptCredentials("access", "refresh", "id", "acct-1");
 
     await manager.WriteChatGptAsync(credentials);
     var result = await manager.ReadChatGptAsync();
@@ -40,7 +40,7 @@ public class AuthManagerTests : IDisposable
   [Fact]
   public async Task WriteChatGptAsync_creates_the_file_with_owner_only_permissions()
   {
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null));
 
     Assert.True(File.Exists(_path));
 
@@ -54,7 +54,7 @@ public class AuthManagerTests : IDisposable
   [Fact]
   public async Task WriteChatGptAsync_leaves_no_temp_file_behind()
   {
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null));
 
     var directory = Path.GetDirectoryName(_path)!;
     var leftovers = Directory.GetFiles(directory, $"{Path.GetFileName(_path)}.*.tmp");
@@ -66,7 +66,7 @@ public class AuthManagerTests : IDisposable
   {
     await File.WriteAllTextAsync(_path, """{"other_setting":"keep-me"}""");
 
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials("a", "r", "i", null));
 
     var root = JsonNode.Parse(await File.ReadAllTextAsync(_path))!.AsObject();
     Assert.Equal("keep-me", root["other_setting"]!.GetValue<string>());
@@ -97,7 +97,7 @@ public class AuthManagerTests : IDisposable
   public async Task GetStatusAsync_reports_signed_in_with_remaining_time_for_an_unexpired_token()
   {
     var token = MakeJwt(_clock.GetUtcNow().AddMinutes(42));
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null));
 
     var status = await MakeManager().GetStatusAsync();
 
@@ -119,7 +119,7 @@ public class AuthManagerTests : IDisposable
   public async Task GetStatusAsync_reports_not_signed_in_for_an_expired_token()
   {
     var token = MakeJwt(_clock.GetUtcNow().AddMinutes(-5));
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null));
 
     var status = await MakeManager().GetStatusAsync();
 
@@ -133,7 +133,7 @@ public class AuthManagerTests : IDisposable
   [InlineData("header.not-base64url!!.sig")]
   public async Task GetStatusAsync_reports_not_signed_in_for_a_malformed_access_token(string token)
   {
-    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null, null));
+    await MakeManager().WriteChatGptAsync(new ChatGptCredentials(token, "r", "i", null));
 
     var status = await MakeManager().GetStatusAsync();
 
