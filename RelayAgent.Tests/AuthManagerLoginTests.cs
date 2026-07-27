@@ -69,6 +69,34 @@ public class AuthManagerLoginTests
   }
 
   [Fact]
+  public async Task LoginAsync_builds_an_authorize_url_whose_escaped_form_keeps_spaces_encoded()
+  {
+    // Regression guard for the browser-launch bug: the scopes are space-separated, so the
+    // authorize URL only survives being handed to `open`/`xdg-open` if it is rendered via
+    // AbsoluteUri (which keeps `%20`) rather than ToString() (which decodes it back to a
+    // literal space, word-splitting the URL into bogus file-path arguments).
+    var path = TempAuthPath();
+    var handler = new FakeTokenEndpoint("id", "access", "refresh", "api-key");
+    var manager = new AuthManager(new HttpClient(handler), TimeProvider.System, path);
+
+    try
+    {
+      var (authorizeUrl, loginTask) = await RunLoginAndCaptureAuthorizeUrlAsync(manager);
+      var query = ParseQuery(authorizeUrl.Query);
+
+      Assert.Contains("scope=openid%20profile%20email", authorizeUrl.AbsoluteUri);
+      Assert.DoesNotContain(' ', authorizeUrl.AbsoluteUri);
+
+      await CompleteCallbackAsync(query["redirect_uri"], query["state"]!);
+      await loginTask;
+    }
+    finally
+    {
+      if (File.Exists(path)) File.Delete(path);
+    }
+  }
+
+  [Fact]
   public async Task LoginAsync_reports_signed_in_status_after_a_successful_login()
   {
     var path = TempAuthPath();
